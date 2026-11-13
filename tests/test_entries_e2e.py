@@ -15,6 +15,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from _fixtures import FakeCtx, FakeProcess
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -276,6 +278,10 @@ def test_readonly_retry_once(load_plugin_init, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # 安全配置真的到达入口层（[真缺陷] 曾一律传空 dict）
 # ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="user roots 只接受 Windows 绝对路径（POSIX /tmp 会被 _sanitize_roots 丢弃）",
+)
 def test_run_sequence_honours_configured_user_root(load_plugin_init, tmp_path, monkeypatch):
     """配置允许的用户目录：注入前拒、注入后放 —— 证明 startup 的注入链是通的。
 

@@ -49,7 +49,6 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-
 from _fixtures import FakeCtx, FakeProcess
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]

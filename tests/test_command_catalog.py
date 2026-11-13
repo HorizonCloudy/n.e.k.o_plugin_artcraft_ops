@@ -13,7 +13,6 @@ import asyncio
 import json
 
 import pytest
-
 from _fixtures import (
     COMMANDS_JSON_PHOTOCRAFT_7,
     COMMANDS_JSON_VECTORCRAFT_6,

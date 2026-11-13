@@ -12,7 +12,6 @@ import os
 import subprocess
 
 import pytest
-
 from _fixtures import (
     FLATTEN_WARNING_FULL_LINE,
     FLATTEN_WARNING_SUBSTR,

@@ -15,7 +15,7 @@ import json
 import os
 from pathlib import Path
 
-from _fixtures import FakeCtx, FakeProcess, PUSH_MAX_BYTES, fake_handle
+from _fixtures import PUSH_MAX_BYTES, FakeCtx, FakeProcess, fake_handle
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 

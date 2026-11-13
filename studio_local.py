@@ -39,8 +39,8 @@ import os
 import subprocess
 from typing import Any, Sequence
 
-from .errors import AppNotFound, ArtcraftError, PolicyViolation
 from . import roots as roots_mod
+from .errors import AppNotFound, ArtcraftError, PolicyViolation
 
 # Studio 不是 APP_SPECS 的成员：它没有 CLI，塞进去会让 list_apps 的 cli_path_found 失真
 STUDIO_APP_ID = "studio"

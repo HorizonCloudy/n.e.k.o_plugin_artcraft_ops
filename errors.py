@@ -22,8 +22,7 @@
   3. 进 logger 的值先 ``redact_text()``，只用预格式化参数，禁 f-string / ``logger.exception``。
 
 本模块**不依赖**宿主 SDK：``err()`` 只产出纯 dict，未装 SDK 时依然可 import、
-可 ``compileall`` / ``ast`` 扫描。SDK 的 ``Err``/``SdkError`` 只有成功路径（``Ok``）
-与入口装饰器需要，留在 ``__init__.py``。
+可 ``compileall`` / ``ast`` 扫描。SDK 的 ``Ok`` 与入口装饰器只在 ``__init__.py`` 用到。
 """
 from __future__ import annotations
 
@@ -33,7 +32,6 @@ import re
 from time import gmtime, strftime
 from typing import Any
 
-from . import i18n  # noqa: F401  (保留模块引用，便于运行时切换语言表)
 from .i18n import ERROR_CODES, t  # noqa: F401  (ERROR_CODES 对外暴露)
 
 logger = logging.getLogger("artcraft_ops")

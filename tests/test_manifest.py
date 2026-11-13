@@ -24,7 +24,6 @@ import tomllib
 from pathlib import Path
 
 import pytest
-
 from _fixtures import EXPECTED_ENTRIES
 
 ROOT = Path(__file__).resolve().parents[1]

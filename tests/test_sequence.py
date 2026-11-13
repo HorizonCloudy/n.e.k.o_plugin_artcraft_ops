@@ -13,7 +13,6 @@ import dataclasses
 import json
 
 import pytest
-
 from _fixtures import (
     CRAFT_ANYTHING_CLI,
     DEFAULT_READ_FLAG,

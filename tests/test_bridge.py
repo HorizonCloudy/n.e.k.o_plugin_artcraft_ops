@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from _fixtures import (
     INSTANCE_JSON_SAMPLE,
     LOOPBACK_HOST,

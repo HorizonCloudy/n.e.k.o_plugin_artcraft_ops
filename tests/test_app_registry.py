@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import pytest
-
 from _fixtures import (
     CRAFT_ANYTHING_CLI,
     DEFAULT_READONLY_PREFIXES,

@@ -17,7 +17,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from _fixtures import FakeCtx
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]

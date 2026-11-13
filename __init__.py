@@ -21,11 +21,9 @@ import dataclasses
 import os
 from typing import Any
 
-from plugin.sdk.plugin import (  # noqa: F401 - SdkError 供骨架/文档对齐
-    Err,
+from plugin.sdk.plugin import (
     NekoPluginBase,
     Ok,
-    SdkError,
     lifecycle,
     llm_tool,
     neko_plugin,
@@ -35,14 +33,18 @@ from plugin.sdk.plugin import (  # noqa: F401 - SdkError 供骨架/文档对齐
 from . import (
     app_registry,
     command_catalog,
-    config as config_mod,
     errors,
     jobs,
     locator,
-    roots as roots_mod,
     sequence,
     spec,
     studio_local,
+)
+from . import (
+    config as config_mod,
+)
+from . import (
+    roots as roots_mod,
 )
 
 # ---------------------------------------------------------------------------

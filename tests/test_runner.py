@@ -13,10 +13,10 @@ import asyncio
 import subprocess
 
 from _fixtures import (
-    FakeProcess,
     MAX_REPLY_BYTES,
     MAX_REQUEST_LINE_BYTES,
     PHOTOCRAFT_CLI,
+    FakeProcess,
 )
 
 

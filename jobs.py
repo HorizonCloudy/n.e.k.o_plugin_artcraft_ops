@@ -20,22 +20,23 @@ import time
 import uuid
 from typing import Any, Iterable
 
-from . import errors, locator, result as result_mod, runner
+from . import errors, locator, runner
+from . import result as result_mod
 from .errors import ArtcraftError, redact, redact_text
 from .spec import (
+    FIXED_PROGRESS_TEMPLATE,
     FORBIDDEN_AI_BEHAVIORS,
     INTERNAL_PROGRESS,
     JOB_TTL_S,
     MESSAGE_PLANE_MAX_BYTES,
     PUSH_MIN_INTERVAL_S,
+    TERMINAL_STATUSES,
     USER_COMPLETION,
     USER_COMPLETION_TEMPLATE,
-    FIXED_PROGRESS_TEMPLATE,
     ExecResult,
     JobState,
     JobStatus,
     RootsPolicy,
-    TERMINAL_STATUSES,
     Transport,
 )
 

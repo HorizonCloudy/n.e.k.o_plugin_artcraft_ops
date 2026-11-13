@@ -20,7 +20,6 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-
 from _fixtures import INSTANCE_JSON_SAMPLE, KNOWN_PATHS
 
 # instance.json 的凭证只在本文件内当「不许进日志」的哨兵，绝不传给实现代码。

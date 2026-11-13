@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import pytest
-
 from _fixtures import DEFAULT_READ_FLAG, DEFAULT_WRITE_FLAG
 
 DATA_DIR = r"C:\state\artcraft_ops\data"

@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import pytest
-
 from _fixtures import (
     EXPECTED_ERROR_CODES,
     FLATTEN_WARNING_FULL_LINE,

@@ -1,0 +1,6 @@
+{
+  "nekoPlugin.repoRoot": "../../AppData/Local/N.E.K.O/maa_end_workspace/repos/N.E.K.O",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/../../AppData/Local/N.E.K.O/maa_end_workspace/repos/N.E.K.O"
+  ]
+}

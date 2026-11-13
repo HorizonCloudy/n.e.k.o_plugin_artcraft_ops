@@ -69,7 +69,7 @@ def _install_stub_sdk() -> None:
     sdk_pkg.__path__ = []                       # type: ignore[attr-defined]
     sdk_plugin = types.ModuleType("plugin.sdk.plugin")
     plugins_pkg = types.ModuleType("plugin.plugins")
-    plugins_pkg.__path__ = []                   # type: ignore[attr-defined]
+    plugins_pkg.__path__ = [str(PLUGIN_ROOT.parent)]  # type: ignore[attr-defined]
 
     class SdkError(Exception):
         def __init__(self, message: str = "") -> None:

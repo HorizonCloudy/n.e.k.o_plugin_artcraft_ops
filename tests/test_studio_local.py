@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import sys
 from pathlib import Path
 
 import pytest
@@ -68,7 +69,8 @@ def test_studio_local_is_not_the_cloud_channel():
 # ---------------------------------------------------------------------------
 # exe 探测
 # ---------------------------------------------------------------------------
-def test_candidates_cover_program_files(impl):
+def test_candidates_cover_program_files(impl, monkeypatch, tmp_path):
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
     studio = impl("studio_local")
     candidates = studio.studio_candidates()
     assert candidates, "候选列表不能为空"
@@ -109,6 +111,10 @@ def test_resolve_returns_empty_when_nothing_installed(impl, monkeypatch):
     assert studio.is_available() is False
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="requires installed ArtCraft Studio",
+)
 def test_studio_installed_on_this_machine(impl):
     """实机断言：本机装了 Studio 就必须解析到真实文件（缺装则 FAIL 提醒）。"""
     studio = impl("studio_local")

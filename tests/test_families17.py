@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import sys
 
 import pytest
 
@@ -300,6 +301,10 @@ def test_locator_derives_all_17_from_registry(impl):
         assert loc._iter_candidates(app_id)[0] == sp.cli_candidates[0]
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="requires installed ArtCraft apps",
+)
 def test_locator_resolves_every_installed_app(impl):
     """本机 17 个 app 全部能解析出真实存在的 CLI（实机断言，缺装就 FAIL 提醒）。"""
     reg = impl("app_registry")

@@ -287,6 +287,7 @@ def test_run_sequence_honours_configured_user_root(load_plugin_init, tmp_path, m
     app, ctx, Err, Ok = _instantiate(module, tmp_path)
     fn = _get_entry(module, app, "artcraft_ops_run_sequence")
     _no_spawn(monkeypatch, [])
+    monkeypatch.setattr(module, "_cli_for", lambda *_: str(tmp_path / "fake-photocraft-cli.exe"))
     roots = module.roots_mod
 
     user_dir = tmp_path / "Pictures"

@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import logging
+import ntpath
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -48,7 +49,7 @@ def test_locator_resolves_absolute_cli_path(impl, tmp_path):
 
 def test_locator_known_paths_are_absolute(impl):
     """正常：§3 三个 app 的已知 CLI 路径都是绝对路径字符串。"""
-    assert all(os.path.isabs(p) for p in KNOWN_PATHS.values())
+    assert all(ntpath.isabs(p) for p in KNOWN_PATHS.values())
     assert KNOWN_PATHS["photocraft"].endswith("photocraft-cli.exe")
     assert KNOWN_PATHS["vectorcraft"].endswith("vectorcraft-cli.exe")
     assert KNOWN_PATHS["craft_anything"].endswith("craft-anything-cli.exe")

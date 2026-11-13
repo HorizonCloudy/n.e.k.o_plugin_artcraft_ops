@@ -20,7 +20,7 @@ _DEFAULT_SECURITY: dict[str, Any] = {
     "user_write_roots": [],
     "deny_prefixes": ["prefs.", "plugin.", "updates."],
     "require_registry_match": True,
-    "require_confirm_on_write": False,
+    "require_confirm_on_write": True,
     "token_file_acl_check": True,
     "loopback_host": "127.0.0.1",
     "allow_user_dirs": False,

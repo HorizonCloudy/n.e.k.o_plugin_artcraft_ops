@@ -1,0 +1,8 @@
+[project]
+# name / version 必须与 plugin.toml 的 [plugin].id 与 [plugin].version 逐字相等
+# （Market 校验器把 pyproject.toml 当仓库级元数据，不一致就是两份版本号）。
+name = "artcraft_ops"
+version = "1.0.13"
+# 运行期零第三方依赖：插件只用标准库 asyncio；宿主 SDK 由宿主提供。
+# 一旦这里加了依赖，Market 要求 vendor/ 目录随包分发（validate_cmd 直接报错）。
+dependencies = []

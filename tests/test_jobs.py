@@ -284,3 +284,244 @@ def test_get_job_unknown_returns_none(impl):
     """错误：未知 job_id 返回 None（不臆造状态，供入口转 JOB_NOT_FOUND）。"""
     jobs = impl("jobs")
     assert jobs.get_job("no-such-job-9999") is None
+
+
+# ---------------------------------------------------------------------------
+# v1.0.13：并发上限、每 app 互斥、终态先到先赢、回执只一次
+# ---------------------------------------------------------------------------
+async def _wait_until(cond, what: str = "", limit: int = 20000) -> None:
+    """只让出事件循环、不睡固定时长；超上限直接判失败（防用例卡死整轮）。"""
+    for _ in range(limit):
+        if cond():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"条件未达成：{what or 'cond'}")
+
+
+async def _await_task(task, what: str = ""):
+    await _wait_until(lambda: task.done(), what or "task not done")
+    return await task
+
+
+class _BlockingProc:
+    """stdout/stderr 永不 EOF，直到 release()：用来把 execute 钉在「运行中」。"""
+
+    def __init__(self) -> None:
+        self.pid = 424244
+        self.returncode = None
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.terminate_calls = 0
+
+    def release(self) -> None:
+        self.returncode = 0
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        self.release()
+
+    def kill(self) -> None:
+        self.terminate()
+
+    async def wait(self) -> int:
+        return int(self.returncode or 0)
+
+
+def _blocking_exec(monkeypatch, bucket: list):
+    async def fake_exec(*args, **kwargs):
+        proc = _BlockingProc()
+        bucket.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec, raising=False)
+    return fake_exec
+
+
+def test_same_app_jobs_run_one_at_a_time(impl, monkeypatch):
+    """同一 app 的两个任务不得并行改同一份文档：第二个必须等第一个结束。"""
+    jobs = impl("jobs")
+    j1 = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+    procs: list = []
+    _blocking_exec(monkeypatch, procs)
+    seen: dict = {}
+    holder: dict = {}
+
+    async def scenario():
+        t1 = asyncio.create_task(jobs.execute(j1))
+        await _wait_until(lambda: bool(jobs._PROC_HANDLES.get(j1.job_id)), "第一个任务未 spawn")
+        seen["after_first"] = (jobs.status_value(j1), len(procs))
+        j2 = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+        holder["j2"] = j2
+        t2 = asyncio.create_task(jobs.execute(j2))
+        for _ in range(200):          # 给循环机会：第二个任务仍不该 spawn
+            await asyncio.sleep(0)
+        seen["queued"] = (jobs.status_value(j1), jobs.status_value(j2), len(procs))
+        procs[0].release()
+        await _await_task(t1, "第一个任务未在释放后结束")
+        await _wait_until(lambda: jobs.status_value(j2) == "running", "第二个任务未被放行")
+        seen["promoted"] = (jobs.status_value(j2), len(procs))
+        procs[1].release()
+        await _await_task(t2, "第二个任务未在释放后结束")
+        seen["final"] = (jobs.status_value(j1), jobs.status_value(j2))
+        return seen
+
+    out = asyncio.run(scenario())
+    assert out["after_first"] == ("running", 1), out
+    assert out["queued"] == ("running", "queued", 1), f"第二个任务不得抢先 spawn：{out}"
+    assert out["promoted"] == ("running", 2), out
+    assert out["final"] == ("succeeded", "succeeded"), out
+
+
+def test_global_concurrency_cap(impl, monkeypatch):
+    """不同 app 的任务也受全局上限约束：同时 RUNNING 不超过 JOB_MAX_CONCURRENCY。"""
+    jobs = impl("jobs")
+    assert jobs.JOB_MAX_CONCURRENCY == 2
+    procs: list = []
+    _blocking_exec(monkeypatch, procs)
+    made: list = []
+
+    async def scenario():
+        for app_id in ("photocraft", "vectorcraft", "pdfcraft"):
+            made.append(jobs.create_job(app_id, ("cli", "run"), is_edit_sequence=True))
+        tasks = [asyncio.create_task(jobs.execute(job)) for job in made]
+        await _wait_until(
+            lambda: len(procs) >= jobs.JOB_MAX_CONCURRENCY,
+            "全局上限内没有起满",
+        )
+        running = [jobs.status_value(job) for job in made]
+        waiting = len(procs)
+        for _ in range(20000):
+            for proc in procs:
+                proc.release()
+            if all(task.done() for task in tasks):
+                break
+            await asyncio.sleep(0)
+        await asyncio.gather(*tasks)
+        return running, waiting
+
+    running, waiting = asyncio.run(scenario())
+    assert running.count("running") == jobs.JOB_MAX_CONCURRENCY, running
+    assert waiting == jobs.JOB_MAX_CONCURRENCY, f"第 3 个任务不得在限额内 spawn：{waiting}"
+    assert all(jobs.status_value(job) == "succeeded" for job in made), [
+        jobs.status_value(job) for job in made
+    ]
+
+
+def test_cancel_while_queued_does_not_run(impl, monkeypatch):
+    """排队中被取消：进入 CANCELLED，绝不 spawn，也不得被回写成成功。"""
+    jobs = impl("jobs")
+    j1 = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+    procs: list = []
+    _blocking_exec(monkeypatch, procs)
+    outcome: dict = {}
+
+    async def scenario():
+        t1 = asyncio.create_task(jobs.execute(j1))
+        await _wait_until(lambda: bool(jobs._PROC_HANDLES.get(j1.job_id)), "第一个任务未 spawn")
+        j2 = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+        t2 = asyncio.create_task(jobs.execute(j2))
+        await _wait_until(lambda: jobs.status_value(j2) == "queued", "第二个任务未处于排队")
+        await jobs.cancel_job(j2.job_id)
+        outcome["after_cancel"] = jobs.status_value(j2)
+        # 排队任务卡在 app lock 上：等前一个跑完放行后才能看到自己已被取消
+        procs[0].release()
+        await _await_task(t1, "第一个任务未在释放后结束")
+        res2 = await _await_task(t2, "被取消的排队任务未返回")
+        outcome["final_status"] = jobs.status_value(j2)
+        outcome["final_error"] = res2.error_code
+        outcome["spawn_count"] = len(procs)
+
+    asyncio.run(scenario())
+    assert outcome["after_cancel"] == "cancelled", outcome
+    assert outcome["final_status"] == "cancelled", outcome
+    assert outcome["final_error"] == "JOB_CANCELLED", outcome
+    assert outcome["spawn_count"] == 1, f"排队任务被取消后不得 spawn：{outcome}"
+
+
+def test_first_terminal_status_wins(impl):
+    """已有终态不得被后到的 _finish 覆盖（取消成功后 CLI 退出码不能翻成 succeeded）。"""
+    jobs = impl("jobs")
+    job = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+    asyncio.run(jobs.cancel_job(job.job_id))
+    jobs._finish(job, jobs.JobStatus.SUCCEEDED, 0)
+    assert jobs.status_value(job) == "cancelled"
+    assert job.exit_code == -1
+
+
+def test_crash_finishes_once(impl):
+    """_crash 走「先到先赢」的 _finish 之后，仍必须写 finished_at。"""
+    jobs = impl("jobs")
+    job = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+    jobs._crash(job, RuntimeError("boom"))
+    assert jobs.status_value(job) == "crashed"
+    assert job.error_code == "JOB_CRASHED"
+    assert job.finished_at > 0.0
+    assert job.updated_at > 0.0
+
+
+def test_completion_reported_only_once(impl, tmp_path):
+    """execute 与 cancel_job 都回执时，消息面只收到一条完成。"""
+    jobs = impl("jobs")
+    ctx = FakeCtx(storage_dir=tmp_path, plugin_dir=PLUGIN_ROOT)
+    job = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+    jobs._finish(job, jobs.JobStatus.SUCCEEDED, 0)
+
+    async def scenario():
+        await jobs.report_completion(job, None, ctx)
+        await jobs.report_completion(job, None, ctx)
+
+    asyncio.run(scenario())
+    assert len(ctx.pushes) == 1, ctx.pushes
+    assert len(ctx.statuses) == 1, ctx.statuses
+
+
+def test_persist_keeps_preview_and_output_files(impl, tmp_path):
+    """preview_url / output_files 是功能字段：重启后必须还在。"""
+    jobs = impl("jobs")
+    saved = dict(jobs._JOBS)
+    try:
+        jobs._JOBS.clear()
+        job = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+        job.output_files = ("C:/state/data/out.png",)
+        job.preview_url = "stub://uploaded"
+        job.completion_reported = True
+        jobs._finish(job, jobs.JobStatus.SUCCEEDED, 0)
+        path = str(tmp_path / "jobs.json")
+        jobs.persist_jobs(path)
+        jobs._JOBS.clear()
+        jobs.restore_jobs(path)
+        restored = jobs.get_job(job.job_id)
+        assert restored is not None
+        assert tuple(restored.output_files) == ("C:/state/data/out.png",)
+        assert restored.preview_url == "stub://uploaded"
+        assert restored.completion_reported is True
+    finally:
+        jobs._JOBS.clear()
+        jobs._JOBS.update(saved)
+
+
+def test_execute_materializes_preview_before_terminal(impl, monkeypatch, tmp_path):
+    """终态前必须 materialize：否则 preview_url 永远是空串（图片回传整条链路是死的）。"""
+    jobs = impl("jobs")
+    procs: list = []
+    _blocking_exec(monkeypatch, procs)
+    job = jobs.create_job("photocraft", ("cli", "run"), is_edit_sequence=True)
+
+    png = tmp_path / "out.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+    job.result_path = str(png)
+    ctx = FakeCtx(storage_dir=tmp_path, plugin_dir=PLUGIN_ROOT)
+
+    async def scenario():
+        task = asyncio.create_task(jobs.execute(job, ctx=ctx))
+        await _wait_until(lambda: bool(jobs._PROC_HANDLES.get(job.job_id)), "未 spawn")
+        procs[0].release()
+        return await _await_task(task, "未结束")
+
+    final = asyncio.run(scenario())
+    assert jobs.status_value(job) == "succeeded", jobs.status_value(job)
+    assert tuple(job.output_files) == (str(png),), job.output_files
+    assert job.preview_url == "stub://uploaded", job.preview_url
+    assert final.preview_url == "stub://uploaded"

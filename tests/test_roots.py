@@ -419,3 +419,56 @@ def test_roots_allow_normal_paths_after_segment_whitespace_fix(impl, good):
     assert good in normalized, f"入参 {good!r} 归一化后丢了段内容：{got!r}"
     assert normalized.lower().startswith(DATA_DIR.replace("\\", "/").lower()), \
         f"入参 {good!r} 必须落在 root 下，实际 {got!r}"
+
+
+# ---------------------------------------------------------------------------
+# v1.0.13 缺口 ②：roots 不得放开整个盘符根 / 系统目录
+# ---------------------------------------------------------------------------
+def test_root_is_forbidden_drive_letter_roots(impl):
+    """盘符根（D:/、C:、C:/）一律禁 —— 前缀匹配等于放开全盘。"""
+    roots = impl("roots")
+    for value in ("D:/", "D:", "C:/", "C:", "E:\\", "e:/"):
+        assert roots.root_is_forbidden(value) is True, value
+
+
+def test_root_is_forbidden_system_dirs(impl):
+    """系统目录根禁；前缀相似的正常目录不得误杀。"""
+    roots = impl("roots")
+    for value in (
+        "C:/Windows", r"C:\Windows", "C:/Program Files", r"D:\Program Files (x86)",
+        "C:/ProgramData", r"C:\WINDOWS\system32", "c:/program files/artcraft",
+    ):
+        assert roots.root_is_forbidden(value) is True, value
+    for value in (
+        "C:/WindowsBackup", "C:/ProgramData2", "C:/Users/Alice/Pictures",
+        "E:/Program FilesX/Artcraft", "D:/artcraft/out", USER_DIR,
+    ):
+        assert roots.root_is_forbidden(value) is False, value
+
+
+def test_whole_drive_never_reaches_policy(impl):
+    """配成整盘的 user root 被丢弃，插件自己的 data/cache 仍保留。"""
+    roots = impl("roots")
+    policy = roots.default_policy(
+        DATA_DIR, CACHE_DIR,
+        {
+            "allow_user_dirs": True,
+            "user_read_roots": ["D:/", USER_DIR, "C:/Windows"],
+            "user_write_roots": [r"C:\Program Files\Artcraft", "E:/artcraft/out"],
+        },
+    )
+    read = [str(r).lower().replace("\\", "/") for r in policy.read_roots]
+    write = [str(r).lower().replace("\\", "/") for r in policy.write_roots]
+    assert "d:/users/alice/pictures" in read, read
+    assert "d:/" not in read and "d:" not in read, f"整盘授权必须丢弃：{read}"
+    assert not any("windows" in r for r in read), read
+    assert not any("program files" in r for r in write), write
+    assert "e:/artcraft/out" in write, write
+    assert DATA_DIR in policy.write_roots and CACHE_DIR in policy.write_roots
+
+
+def test_sanitize_roots_drops_forbidden(impl):
+    """_sanitize_roots 也要丢禁用根：配置注入阶段就洗掉，不留「已授权」的错觉。"""
+    roots = impl("roots")
+    assert roots._sanitize_roots(["C:/Windows", USER_DIR]) == [USER_DIR_NORM]
+    assert roots._sanitize_roots(["D:/"]) == []

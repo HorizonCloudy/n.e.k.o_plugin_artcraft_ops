@@ -18,11 +18,19 @@ from .errors import redact, redact_text
 from .i18n import t
 from .spec import (
     MAX_REPLY_BYTES,
+    PREVIEW_MAX_PNG_BYTES,
     ExecResult,
     SpillPolicy,
 )
 
 _FLATTEN_DEFAULT = "flattened; layers, masks and blend modes are not kept"
+# 图片回传（深评缺口④）：MIME 一律由**文件头**决定，扩展名只用于筛选候选产物。
+_EXT_MIME: dict[str, str] = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
 _ERROR_CODES_WITH_STDERR = frozenset({"CLI_USAGE_ERROR", "CLI_TASK_FAILED"})
 
 
@@ -211,6 +219,23 @@ def compose_user_message(r: ExecResult, lang: str = "zh") -> str:
     return "\n".join(line for line in lines if line)
 
 
+def _sniff_mime(data: bytes) -> str:
+    """按文件头认 MIME；认不出返回空串（**不猜**：猜错就是把坏数据推给宿主）。"""
+    if data.startswith(_PNG_MAGIC):
+        return "image/png"
+    if data.startswith(_JPEG_MAGIC):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def _add_warning(target: list[str], text: str) -> None:
+    """同一张图的同一类警告只留一条（重试路径会把同一个 result 走两遍）。"""
+    if text not in target:
+        target.append(text)
+
+
 def _png_preview_bytes(path: str, max_bytes: int) -> bytes | None:
     try:
         if not os.path.isfile(path):
@@ -271,27 +296,43 @@ async def materialize(r: ExecResult, policy: SpillPolicy, ctx: Any = None) -> di
     if r.inspect is not None:
         payload["inspect"] = r.inspect
 
-    # 预览图：结果阶段才 upload，绝不在 lifecycle 调
+    # 预览图：结果阶段才 upload，绝不在 lifecycle 调。
+    # 深评缺口④：旧实现 mime 一律写 image/png、读不到/上传失败静默 break，
+    # 用户看到的是「回执说完成、图却没了」。现在每张都认文件头，失败给固定警告并继续。
     if (
         getattr(policy, "preview_via_upload", True)
         and not r.preview_url
         and ctx is not None
         and getattr(ctx, "images", None) is not None
     ):
+        notes: list[str] = payload["warnings"]
         for path in r.output_files or ():
-            if not str(path).lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            name = os.path.basename(str(path).replace("\\", "/"))
+            suffix = os.path.splitext(name)[1].lower()
+            ext_mime = _EXT_MIME.get(suffix)
+            if ext_mime is None:
                 continue
-            data = _png_preview_bytes(str(path), 5 * 1024 * 1024)
+            data = _png_preview_bytes(str(path), PREVIEW_MAX_PNG_BYTES)
             if data is None:
+                _add_warning(notes, f"preview_unreadable: {name}")
                 continue
+            sniffed = _sniff_mime(data)
+            if not sniffed:
+                _add_warning(notes, f"preview_unknown_format: {name}")
+                continue
+            if sniffed != ext_mime:
+                _add_warning(notes, f"preview_mime_mismatch: {name} -> {sniffed}")
             try:
-                uploaded = await ctx.images.upload(data, mime="image/png")
-            except Exception:  # 上传失败不影响文本回执
-                break
+                uploaded = await ctx.images.upload(data, mime=sniffed)
+            except Exception:  # 上传失败不影响文本回执，但必须说出来
+                _add_warning(notes, f"preview_upload_failed: {name}")
+                continue
             if isinstance(uploaded, dict):
                 r.preview_url = str(uploaded.get("url") or "")
                 payload["preview_url"] = r.preview_url
-            break
+            if r.preview_url:
+                break
+        r.warnings = tuple(notes)
 
     blob = json.dumps(redact(payload), ensure_ascii=False, default=str)
     size = len(blob.encode("utf-8"))
@@ -325,6 +366,6 @@ async def materialize(r: ExecResult, policy: SpillPolicy, ctx: Any = None) -> di
 
 
 __all__ = [
-    "parse_exec_output", "extract_inspect", "collect_warnings",
+    "parse_exec_output", "extract_inspect", "collect_warnings", "_sniff_mime",
     "compose_user_message", "command_step_count", "materialize",
 ]

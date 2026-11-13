@@ -497,11 +497,19 @@ def test_success_run_sequence_payload_has_no_success_key(
     calls: list = []
     _no_spawn(monkeypatch, calls)
 
-    res = _run(plugin.artcraft_ops_run_sequence(
-        app="photocraft",
-        steps=[{"cmd": "edit.fill", "params": {"color": "#fff"}}],
-        out_file="out.png", inspect=True,
-    ))
+    async def _confirm_then():
+        from _fixtures import run_write
+
+        async def settle(value):
+            return await _settle(value)
+
+        return await run_write(
+            plugin.artcraft_ops_run_sequence, settle=settle, app="photocraft",
+            steps=[{"cmd": "edit.fill", "params": {"color": "#fff"}}],
+            out_file="out.png", inspect=True,
+        )
+
+    res = asyncio.run(_confirm_then())
     assert hasattr(res, "value"), f"成功必须返回 Ok(dict)，实际 {res!r}"
     payload = res.value
     assert isinstance(payload, dict), f"成功应返回 Ok(dict)，实际 {res!r}"

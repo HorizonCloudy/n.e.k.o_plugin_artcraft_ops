@@ -20,6 +20,14 @@ from typing import Any, Literal
 from .errors import PolicyViolation
 from .spec import DEFAULT_READ_FLAG, DEFAULT_WRITE_FLAG, RootsPolicy, RunMode
 
+# 授权 root 的底线（深评缺口②）：纯文本前缀匹配下，root 写成盘符根等于放开
+# 整个盘，写成 C:/Windows 等于放开系统目录。两类一律拒，首段**精确**比对，
+# 所以 C:/WindowsBackup、C:/ProgramData2 这类正常目录不受影响。
+_DRIVE_ROOT_RE = re.compile(r"^[A-Za-z]:[\\/]{0,1}$")
+_SYSTEM_ROOT_SEGMENTS = frozenset({
+    "windows", "program files", "program files (x86)", "programdata",
+})
+
 _DEVICE_NAMES = frozenset({
     "con", "prn", "aux", "nul",
     *(f"com{i}" for i in range(1, 10)),
@@ -233,6 +241,22 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
+def root_is_forbidden(raw: str) -> bool:
+    """盘符根 / 系统目录根不得作为授权 root；归一失败的条目交给调用方丢弃。"""
+    text = str(raw or "").strip().strip('"').strip("'")
+    if not text:
+        return False
+    try:
+        norm = normalize_win_path(text)
+    except Exception:                       # noqa: BLE001 - 非路径条目不算禁用
+        return False
+    if _DRIVE_ROOT_RE.match(norm):
+        return True
+    body = re.sub(r"^[A-Za-z]:", "", norm).lstrip("/")
+    head = body.split("/", 1)[0].strip().lower()
+    return head in _SYSTEM_ROOT_SEGMENTS
+
+
 def _sanitize_roots(values: Any) -> list[str]:
     """只保留能归一成**绝对路径**的条目，其余丢弃。
 
@@ -254,6 +278,8 @@ def _sanitize_roots(values: Any) -> list[str]:
             continue
         if not (_DRIVE_RE.match(norm) or norm.startswith("//")):
             continue
+        if root_is_forbidden(norm):
+            continue
         key = _canonical(norm)
         if key in seen:
             continue
@@ -274,6 +300,7 @@ def configure_security(cfg: dict[str, Any] | None) -> dict[str, Any]:
         "allow_user_dirs": _as_bool(source.get("allow_user_dirs", False)),
         "user_read_roots": _sanitize_roots(source.get("user_read_roots")),
         "user_write_roots": _sanitize_roots(source.get("user_write_roots")),
+        "require_confirm_on_write": _as_bool(source.get("require_confirm_on_write", True)),
         "mode": source.get("mode") or RunMode.HEADLESS,
     }
     return active_security()
@@ -285,6 +312,9 @@ def active_security() -> dict[str, Any]:
         "allow_user_dirs": _as_bool(_SECURITY_CFG.get("allow_user_dirs", False)),
         "user_read_roots": list(_SECURITY_CFG.get("user_read_roots", ()) or ()),
         "user_write_roots": list(_SECURITY_CFG.get("user_write_roots", ()) or ()),
+        "require_confirm_on_write": _as_bool(
+            _SECURITY_CFG.get("require_confirm_on_write", True),
+        ),
         "mode": _SECURITY_CFG.get("mode") or RunMode.HEADLESS,
     }
 
@@ -311,11 +341,11 @@ def default_policy(data_dir: str, cache_dir: str, cfg: dict | None = None) -> Ro
     if allow_user:
         for item in settings.get("user_read_roots", ()) or ():
             value = str(item or "").strip()
-            if value:
+            if value and not root_is_forbidden(value):
                 read_roots.append(value)
         for item in settings.get("user_write_roots", ()) or ():
             value = str(item or "").strip()
-            if value:
+            if value and not root_is_forbidden(value):
                 write_roots.append(value)
     mode = settings.get("mode") or RunMode.HEADLESS
     if isinstance(mode, str) and not isinstance(mode, RunMode):
@@ -333,6 +363,7 @@ def default_policy(data_dir: str, cache_dir: str, cfg: dict | None = None) -> Ro
 
 __all__ = [
     "normalize_win_path", "resolve_and_check", "build_root_flags",
+    "root_is_forbidden",
     "default_policy", "active_policy", "configure_security", "active_security",
     "_is_within",
 ]

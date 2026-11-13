@@ -20,7 +20,7 @@ import time
 import uuid
 from typing import Any, Iterable
 
-from . import errors, locator, runner
+from . import confirm, errors, locator, runner
 from . import result as result_mod
 from .errors import ArtcraftError, redact, redact_text
 from .spec import (
@@ -37,6 +37,7 @@ from .spec import (
     JobState,
     JobStatus,
     RootsPolicy,
+    SpillPolicy,
     Transport,
 )
 
@@ -44,6 +45,10 @@ _JOBS: dict[str, JobState] = {}
 _PROC_HANDLES: dict[str, runner.ProcHandle] = {}
 _PERSIST_PATH: str = ""
 JOB_MAX_RUNTIME_S: float = 300.0     # 后台长任务上限（LLM 硬上限 300s）
+# 深评缺口③：旧实现没有任何并发上限，两个任务可以同时改同一份文档。
+# 口径：全局最多 2 个 job 同时跑；同一个 app 串行（每 app 一把锁）。
+JOB_MAX_CONCURRENCY: int = 2
+_PRIMS: dict[str, Any] = {"loop": None, "semaphore": None, "app_locks": {}}
 
 logger = logging.getLogger("artcraft_ops")
 
@@ -52,6 +57,26 @@ def init_handles() -> None:
     """startup 用：确保容器存在（纯内存，不 spawn、不读网络）。"""
     _JOBS.clear()
     _PROC_HANDLES.clear()
+    _PRIMS.update(loop=None, semaphore=None, app_locks={})
+    confirm.clear()
+
+
+def _primitives(app_id: str) -> tuple[Any, Any]:
+    """按**当前** event loop 取 (全局信号量, 该 app 的锁)；换 loop 整体重建。
+
+    shortcut: asyncio 原语绑定创建它的 loop，宿主换 loop 复用旧原语会直接报错；
+    重建等于放弃旧 loop 里的排队顺序 —— 若将来允许跨 loop 存活 job，需改为按 loop 分组。
+    """
+    loop = asyncio.get_running_loop()
+    if _PRIMS["loop"] is not loop:
+        _PRIMS["loop"] = loop
+        _PRIMS["semaphore"] = asyncio.Semaphore(JOB_MAX_CONCURRENCY)
+        _PRIMS["app_locks"] = {}
+    locks: dict[str, Any] = _PRIMS["app_locks"]
+    key = str(app_id or "")
+    if key not in locks:
+        locks[key] = asyncio.Lock()
+    return _PRIMS["semaphore"], locks[key]
 
 
 def status_value(job: JobState) -> str:
@@ -233,9 +258,15 @@ def report_status_payload(job: JobState) -> dict[str, Any]:
 
 
 async def report_completion(job: JobState, result: ExecResult | None, ctx: Any) -> None:
-    """终态回执：``report_status``（结构化、字段白名单）+ ``push_message``（脱敏摘要）。"""
+    """终态回执：``report_status``（结构化、字段白名单）+ ``push_message``（脱敏摘要）。
+
+    execute 与 cancel_job 都可能对同一个 job 回执，`completion_reported` 保证只发一条。
+    """
     if ctx is None:
         return
+    if getattr(job, "completion_reported", False):
+        return
+    job.completion_reported = True
     report = getattr(ctx, "report_status", None)
     if callable(report):
         try:
@@ -261,6 +292,9 @@ def _readonly_retry_allowed(job: JobState) -> bool:
 
 
 def _finish(job: JobState, status: JobStatus, exit_code: int | None = None) -> None:
+    """先到先赢：已有终态不得被后到的成功/失败覆盖（取消后 CLI 的退出码不是结果）。"""
+    if status_value(job) in TERMINAL_STATUSES:
+        return
     now = time.time()
     job.status = status
     job.exit_code = exit_code
@@ -281,15 +315,54 @@ def _cancel_final(job: JobState) -> "ExecResult":
 
 
 def _crash(job: JobState, exc: BaseException) -> None:
-    job.status = JobStatus.CRASHED
+    # 先落终态（写 finished_at/updated_at），再补错误字段：
+    # _finish 现在先到先赢，把 status 提前写死会让它整段跳过。
     job.error_code = "JOB_CRASHED"
     job.error_message = errors.build_error_message("JOB_CRASHED")
     job.warnings = (job.warnings or ()) + (redact_text(f"crashed: {type(exc).__name__}"),)
     _finish(job, JobStatus.CRASHED, -1)
 
 
+def _preempted(job: JobState) -> bool:
+    """等锁期间被取消或已被判终态 —— 这两种都不得再 spawn。"""
+    return bool(job.cancel_requested) or status_value(job) in TERMINAL_STATUSES
+
+
+async def _cancelled(job: JobState, ctx: Any) -> ExecResult:
+    final = _cancel_final(job)
+    persist_if_configured()
+    await report_completion(job, final, ctx)
+    return final
+
+
+def _spill_policy() -> SpillPolicy:
+    """大响应落盘目录 = job 表所在目录（插件 data/），失败回落系统临时目录。"""
+    base = os.path.dirname(_PERSIST_PATH) if _PERSIST_PATH else ""
+    return SpillPolicy(spill_dir=base)
+
+
 async def execute(
     job: JobState, ctx: Any = None, spec: Any = None, roots: RootsPolicy | None = None,
+) -> ExecResult:
+    """排队后执行：同一个 app 串行，全局最多 ``JOB_MAX_CONCURRENCY`` 个任务在跑。
+
+    锁在写 ``RUNNING`` **之前**取：等锁期间 job 仍是 QUEUED，此时取消能干净地
+    落在 CANCELLED（否则会出现「已经 RUNNING、进程却还没起」的窗口）。
+    shortcut: 排队中的协程要等拿到锁才发现自己已终态；取消是即时生效在 **job 状态**
+    上（get_job 立刻返回 cancelled），只是后台 task 的退出点延后，绝不额外跑一步。
+    """
+    semaphore, app_lock = _primitives(job.app_id)
+    async with app_lock:
+        if _preempted(job):
+            return await _cancelled(job, ctx)
+        async with semaphore:
+            if _preempted(job):
+                return await _cancelled(job, ctx)
+            return await _run_locked(job, ctx, spec, roots)
+
+
+async def _run_locked(
+    job: JobState, ctx: Any, spec: Any, roots: RootsPolicy | None,
 ) -> ExecResult:
     """后台执行一次 ``run``；终态写回 ``job`` 并推消息面回执。
 
@@ -388,9 +461,13 @@ async def execute(
         final = result_mod.parse_exec_output(raw, spec, job)
         job.exit_code = raw.returncode
         job.stdout_lines = len(raw.stdout_lines)
+        job.inspect = final.inspect
+        # 消息面裁剪 + 图片回传：终态之前做，`get_job` 才看得到 preview_url / 产物清单
+        await result_mod.materialize(final, _spill_policy(), ctx)
         job.warnings = final.warnings
         job.result_handle = final.result_handle
-        job.inspect = final.inspect
+        job.output_files = tuple(final.output_files or ())
+        job.preview_url = final.preview_url
         job.progress = 1.0 if final.ok else job.progress
         if final.ok:
             _finish(job, JobStatus.SUCCEEDED, raw.returncode)
@@ -483,6 +560,9 @@ def _job_to_dict(job: JobState) -> dict[str, Any]:
         else str(job.transport),
         "remote_job_id": job.remote_job_id, "cancel_method": job.cancel_method,
         "step_total": job.step_total, "step_done": job.step_done,
+        "output_files": list(job.output_files or ()),
+        "preview_url": job.preview_url,
+        "completion_reported": bool(job.completion_reported),
     }
 
 
@@ -585,6 +665,11 @@ def restore_jobs(path: str) -> None:
             cancel_method=str(record.get("cancel_method") or ""),
             step_total=int(record.get("step_total") or 0),
             step_done=int(record.get("step_done") or 0),
+            output_files=tuple(
+                str(p) for p in (record.get("output_files") or ())
+            ),
+            preview_url=str(record.get("preview_url") or ""),
+            completion_reported=bool(record.get("completion_reported", False)),
         )
         if job.status is JobStatus.RUNNING and not _pid_alive(job.pid):
             job.status = JobStatus.CRASHED
@@ -594,7 +679,7 @@ def restore_jobs(path: str) -> None:
 
 
 __all__ = [
-    "_JOBS", "_PROC_HANDLES", "JOB_MAX_RUNTIME_S",
+    "_JOBS", "_PROC_HANDLES", "JOB_MAX_RUNTIME_S", "JOB_MAX_CONCURRENCY",
     "init_handles", "create_job", "get_job", "status_value",
     "should_push", "push_progress", "report_status_payload", "report_completion",
     "execute", "cancel_job", "shutdown_all",

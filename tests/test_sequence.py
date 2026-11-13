@@ -367,3 +367,58 @@ def test_check_command_allowed_empty_cmd_rejected(impl):
         sequence.check_command_allowed("", spec_pc, policy, frozenset({"edit.fill"}))
     assert "POLICY_VIOLATION" in _detail(ei.value) or "PolicyViolation" in _detail(ei.value), \
         _detail(ei.value)
+
+
+# ---------------------------------------------------------------------------
+# v1.0.13 缺口 ⑤：键名不像路径、值明显像路径 —— 也要过 roots
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_key_with_absolute_value_is_checked(impl):
+    """词表外键（options.name）收 C:\\Windows\\win.ini：不再放行。"""
+    sequence = impl("sequence")
+    policy = _roots_policy(impl)
+    for params in (
+        {"options": {"name": r"C:\Windows\win.ini"}},
+        {"note": "file:///C:/Windows/win.ini"},
+        {"anything": "//server/share/x.icc"},
+        {"meta": {"label": r"\Windows\win.ini"}},
+    ):
+        with pytest.raises(Exception) as ei:
+            sequence.validate_params(params, policy)
+        assert "PATH_OUTSIDE_ROOTS" in _detail(ei.value) or "PATH_UNSAFE" in _detail(ei.value), \
+            _detail(ei.value)
+
+
+def test_unknown_key_pathish_relative_parent_dir_rejected(impl):
+    """值里有独立 `..` 段同样按路径拒（与路径键同口径）。"""
+    sequence = impl("sequence")
+    policy = _roots_policy(impl)
+    with pytest.raises(Exception) as ei:
+        sequence.validate_params({"label": r"..\..\secret.png"}, policy)
+    assert "POLICY_VIOLATION" in _detail(ei.value) or "不允许出现" in _detail(ei.value), \
+        _detail(ei.value)
+
+
+def test_unknown_key_ordinary_values_still_pass(impl):
+    """放行面必须钉住：文档名、通道记号、SVG path data、URL、8.3 短名不受影响。"""
+    sequence = impl("sequence")
+    policy = _roots_policy(impl)
+    for params in (
+        {"name": "A: study"},
+        {"channel": "layer:3"},
+        {"channel": "R:1"},
+        {"script": "M0 0 L10 10 Z"},
+        {"href": "https://cdn.example.com/a/../b.png"},
+        {"href": "http://127.0.0.1:8080/x"},
+        {"file_name_no_key": "report~1.png"},
+        {"body": "{color: red}"},
+        {"name": "C:secret.png"},
+    ):
+        sequence.validate_params(params, policy)
+
+
+def test_pathish_check_skipped_without_roots(impl):
+    """roots=None 保持旧行为：整段路径检查跳过。"""
+    sequence = impl("sequence")
+    sequence.validate_params({"options": {"name": r"C:\Windows\win.ini"}})

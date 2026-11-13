@@ -87,8 +87,12 @@ exe_path = ""                          # 例：'C:\Program Files\ArtCraft\artcra
 # 只写 roots 不打开开关 = 不生效；相对路径、空串会被丢弃（写绝对路径）。
 #
 # ⚠️ 这是一条**真实**的放宽：列进来的目录，模型就能读（read）/ 写（write）。
-#    roots 是逐段纯文本前缀比对，所以 ["C:\\"] 等价于放开整块盘、
-#    ["C:\\Users\\<你>"] 等价于放开整个用户目录。只列你确实要交进去的那一层。
+#    roots 是逐段纯文本前缀比对，所以 ["C:\\Users\\<你>"] 等价于放开整个用户目录。
+#    只列你确实要交进去的那一层。
+#
+# ⚠️ 盘符根与系统目录会被**直接丢弃**（v1.0.13）："C:" / "D:/" / "C:\\Windows" /
+#    "C:\\Program Files[(x86)]" / "C:\\ProgramData" 一律不进 roots。
+#    首段**精确**比对，C:\\WindowsBackup、C:\\ProgramData2 这类正常目录不受影响。
 # ---------------------------------------------------------------------------
 [artcraft.security]
 allow_user_dirs = false
@@ -96,7 +100,10 @@ user_read_roots = []                   # 例：['C:\\Users\\<你>\\Pictures\\art
 user_write_roots = []                  # 不给写就别填；导出优先写回插件 data/
 deny_prefixes = ["prefs.", "plugin.", "updates."]
 require_registry_match = true
-require_confirm_on_write = false
+# true（默认）：写操作要两步确认 —— 第一次只回 confirmation_handle，第二次带
+#   confirmed=true + confirmation_handle 才执行。令牌一次性、绑请求指纹、5 分钟有效。
+#   关掉它等于让模型可以不经确认直接改文件，除非你确实需要，否则别改。
+require_confirm_on_write = true
 token_file_acl_check = true
 loopback_host = "127.0.0.1"           # 字面回环地址；localhost 会解析到 [::1]，app 只绑 127.0.0.1
 redact_fields = [

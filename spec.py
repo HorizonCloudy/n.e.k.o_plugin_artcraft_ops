@@ -205,6 +205,9 @@ class JobState:
     cancel_method: str = ""                   # 如 "jobs.cancel"；空=主通道无远端取消命令
     step_total: int = 0                       # 计划步数（进度分母）
     step_done: int = 0
+    output_files: tuple[str, ...] = ()        # materialize 回写的产物路径
+    preview_url: str = ""                     # 图片回传 URL（终态前 materialize 写入）
+    completion_reported: bool = False         # 终态回执只发一次
 
 
 @dataclass
@@ -247,7 +250,7 @@ class CommandPolicy:
     deny_exact: tuple[str, ...] = ()
     deny_prefixes: tuple[str, ...] = ("prefs.", "plugin.", "updates.")
     require_registry_match: bool = True
-    require_confirm_on_write: bool = False
+    require_confirm_on_write: bool = True      # 深评缺口①：写操作默认二次确认
     max_steps: int = 256
 
 
@@ -298,6 +301,8 @@ TOOL_OUTPUT_ALLOWLIST: frozenset[str] = frozenset({
     # Studio 本地 GUI 交接（handoff_verified 恒 False：Popen 成功 != 窗口已加载）
     "launched", "studio_available", "file_count", "handoff_verified",
     "exe_path", "note",
+    # 写操作二次确认（v1.0.13）
+    "confirmation_required", "confirmation_handle", "confirmation_expires_in_s",
 })
 
 # §19.17：工具出口里的**自由文本**字段 —— 只用于人读/模型读，没有 isfile 消费者，

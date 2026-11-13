@@ -67,7 +67,12 @@ allow_user_dirs = true
 user_read_roots = ['C:\Users\<你>\Pictures\artcraft']
 ```
 
-> ⚠️ 这是真实的放宽：列进来的目录，模型就能读/写。`["C:\\"]` 等价于放开整块盘。
+> ⚠️ 这是真实的放宽：列进来的目录，模型就能读/写。
+>
+> **整盘与系统目录不作数**（v1.0.13）：`C:` / `D:/` 这类盘符根，以及
+> `C:\Windows` / `C:\Program Files` / `C:\Program Files (x86)` / `C:\ProgramData`
+> 会被直接丢弃（比对只看**首段**且精确相等，所以 `C:\WindowsBackup` 不受影响）。
+> 前缀匹配下写成盘符根等于放开整块盘，这类配置不是「授权更宽」，是配错。
 
 路径判据（逐段纯文本，`roots.py`）：
 
@@ -78,6 +83,31 @@ user_read_roots = ['C:\Users\<你>\Pictures\artcraft']
 | 备用数据流 | `file.png:hidden:$DATA` |
 | 8.3 短名 | `PROGRA~1` |
 | 越界符号链接 | 真实存在时 `realpath` 再比一次 |
+
+参数校验不再只看**键名**（v1.0.13）：词表（`path` / `outPath` / `profile` …）仍是
+主判据并带读写方向，词表外的键只要**值明显是路径拼写**（盘符+分隔符、前导分隔符、
+UNC、`file:`、含独立 `..` 段）同样送 roots。放行面钉死在：`A: study`、`layer:3`、
+`R:1`、SVG path data、`report~1.png`、白名单 http/https URL —— 即「值像路径才查」，
+不是「任何字符串都当路径」。
+
+### 写操作二次确认
+
+`require_confirm_on_write` 默认 **true**。写操作 = 序列含编辑命令、或给了
+`out_file` / `new_doc`、或该 app 用 `--project` 落新工程。第一次提交**不建任务**，返回：
+
+```json
+{"confirmation_required": true, "confirmation_handle": "…", "confirmation_expires_in_s": 300}
+```
+
+用**同一批参数**再提交一次，带 `confirmed=true` 与 `confirmation_handle` 才真正执行。
+令牌一次性、只存内存、且绑定请求指纹（换 out_file 或换 steps 即失效）。
+只读序列不受影响；配置里显式写 `require_confirm_on_write = false` 可关掉。
+
+### 并发与取消
+
+同时最多跑 **2** 个任务（全局），同一个 app 串行（每 app 一把锁）——
+两个任务同时改同一份文档会互相踩。排队期间取消是干净的：任务停在
+`cancelled`，不会 spawn 子进程；终态**先到先赢**，取消之后不会被 CLI 退出码翻成成功。
 
 ---
 
@@ -108,7 +138,7 @@ python -m pytest -q            # 全量；需要本机真实 CLI 的用例默认
 python -m pytest -q -m integration   # 仅在装了真机 CLI 时跑端到端
 ```
 
-**328 passed / 1 skipped**（Python 3.13 / 3.14，pytest 9.x 均可）。
+**361 passed / 1 skipped**（Python 3.11 / 3.13 / 3.14，pytest 9.x 均可）。
 
 约定：
 
@@ -123,7 +153,9 @@ python -m pytest -q -m integration   # 仅在装了真机 CLI 时跑端到端
 
 | 项 | 说明 |
 |---|---|
-| 双通道有意的保守重复 | `file:` 分支自带 `seg.strip()==".."` 判据，与 `roots` 段判据重叠；删了会改错误码并打红既有用例 |
+| 双通道有意的保守重复 | `file:` 分支自带 `seg.strip()==".."` 判据，与 `roots` 段判据重叠；删了会改错误码 |
+| 词表外键的**相对**路径值 | 仍不查（如 `{"name": "sub/win.ini"}`）。值判据只认明显路径拼写，把任意字符串都当路径会误杀 SVG path data / `layer:3` / 8.3 短名 |
+| 排队任务的取消退出点 | 取消立刻改 **job 状态**（`get_job` 当场返回 cancelled、绝不 spawn），但后台协程要等拿到锁才发现自己已终态 |
 | `...` / `.. .` / `foo.` | 不拒。无契约依据、实测在 Win32 上不可穿越，钉住等于把实现细节冻成契约 |
 | `\u200b`(ZWSP) / `\ufeff`(BOM) | 不属 `str.isspace()`，两侧放行；实测不可穿越 |
 | `root/ con/f.txt` | 会被误判为设备名而拒绝（前导空格 + 设备名）。属 fail-closed 偏严兜底，是有意代价 |
@@ -141,7 +173,8 @@ artcraft_ops/
 ├── __init__.py            # 应用层：入口 + LLM 工具双注册 + lifecycle
 ├── sequence.py            # 领域层：argv 构建 + 参数/路径校验
 ├── roots.py               # 安全：目录授权 + Windows 路径段判据
-├── jobs.py                # 任务状态机 + 进度节流 + 持久化
+├── jobs.py                # 任务状态机 + 并发上限 + 持久化
+├── confirm.py             # 写操作二次确认令牌（一次性、绑请求指纹）
 ├── runner.py              # 子进程：spawn / stream_lines / terminate
 ├── locator.py             # CLI 定位 + 版本探测 + 脱敏日志
 ├── command_catalog.py     # 命令注册表：发现 / 缓存 / 检索

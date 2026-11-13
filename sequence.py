@@ -99,6 +99,10 @@ _ABS_PATH_RE = re.compile(r"^[A-Za-z]:(?![0-9])")
 # 所以本分支不能算「修掉了一个本机可用漏洞」，属**跨平台保守**：若某个平台的 CLI
 # 接受该拼写，这里就是唯一防线。别据本条宣称「本机已修复的真实洞」。
 _FILE_SCHEME_RE = re.compile(r"(?i)^file:")
+# 深评缺口⑤：键名词表之外的**值**若是明显路径拼写（盘符+分隔符 / 前导分隔符 /
+# UNC / file:），同样送 roots。判据刻意只看「一眼就是路径」的开头，所以
+# `A: study` / `layer:3` / `R:1` / SVG path data / 8.3 短名都不受影响。
+_PATHISH_PREFIX_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/]|file:)", re.IGNORECASE)
 # 其余 `scheme://` 的形状（**不**等于「是 URL」）：`..` 是否跳过由下面的白名单决定。
 # 要求 `://` 而非裸 `scheme:`，才不会把 `layer:3` / `R:1` / 内联 `x:y` 当 URL。
 # 带捕获组是为了取 scheme 名去查白名单。
@@ -630,6 +634,17 @@ def _param_roots_for(
     return (tuple(roots.read_roots or ()) + tuple(roots.write_roots or ()), "read")
 
 
+def _looks_pathish(text: str) -> bool:
+    """词表外键的取值判据：True 才送 ``_check_one_param_path``。"""
+    if _PATHISH_PREFIX_RE.match(text):
+        return True
+    match = _URL_SCHEME_RE.match(text)
+    if match:
+        # 白名单 URL 放行；其余 scheme:// 与路径键同口径按路径处理（fail-closed）
+        return match.group(1).lower() not in _URL_SCHEMES
+    return any(seg.strip() == ".." for seg in re.split(r"[\\/]", text))
+
+
 def _check_one_param_path(
     roots: RootsPolicy, direction: Literal["read", "write", "any"],
     key: str, tokens: frozenset[str], raw: str,
@@ -811,8 +826,12 @@ def _check_params_paths(
                 else:
                     walk(item, depth + 1, key, tokens)
             return
-        if isinstance(value, str) and tokens & key_set:
-            _check_one_param_path(roots, direction, key, tokens, value)
+        if isinstance(value, str):
+            if tokens & key_set:
+                _check_one_param_path(roots, direction, key, tokens, value)
+            elif _looks_pathish(value.strip()):
+                # 键名不在词表、值明显是路径：按 any 方向（读根∪写根）走同一套判据
+                _check_one_param_path(roots, "any", key, frozenset(), value.strip())
 
     walk(params, 0, "", frozenset())
 
@@ -851,11 +870,13 @@ def validate_params(
         （`http` / `https`）：它们的 `..` 由服务端归一，不套用这条判据。
 
     已知边界（主理人 2026-11-08 逐条裁决「不修」，改动前请先回到裁决理由）：
-      1. `{"options": {"name": "C:\\Windows\\win.ini"}}` 放行 —— 非路径 key 的字符串
-         dict 值不查（`options.name` 是合成示例，实名命令清单见第 4 条）。这是刻意
-         的代价：把任意字符串都当路径会把 SVG path data、`layer:3`、URL、8.3 短名
-         一起误杀。若某命令的路径参数用了映射外的 key 名，应当往
-         `_PATH_KEY_DIRECTION` 补 token，而不是在这里放宽判据。
+      1. [已收口，主理人 2026-11-13 裁决改判] 非路径 key 的 dict 值过去一律放行
+         （`{"options": {"name": "C:\\Windows\\win.ini"}}` 是当时的合成示例）。现在按
+         **值形状**补判据（`_looks_pathish`）：只有盘符+分隔符、前导分隔符、UNC、
+         `file:` 和白名单外 `scheme://` 以及含独立 `..` 段的值才送 roots，其余
+         （SVG path data、`layer:3`、`R:1`、`A: study`、`report~1.png`、http/https
+         URL）仍放行 —— 即「值像路径才校验」，不是「任何字符串都当路径」。
+         词表**仍然是**主判据（它带方向），这条只兜词表外的漏判。
       2. `R:abc`（字母通道名）被当盘符相对拒 —— **不放宽**绝对判据：改成
          `(?![0-9A-Za-z])` 会把 `C:secret.png` 一起放行，等于把刚补的洞开回去。
          宁可对极少数字母通道名偏严。

@@ -209,6 +209,17 @@ def test_entries_match_decorators():
     assert declared == set(EXPECTED_ENTRIES), "五个入口名必须精确匹配 §5/§9"
 
 
+def test_pyproject_matches_manifest_version():
+    """pyproject.toml 与 plugin.toml 的版本必须逐字相等（两份版本号必然漂移）。"""
+    plugin = tomllib.loads(_read_text(PLUGIN_TOML_NAME))["plugin"]
+    pyproject = tomllib.loads(_read_text("pyproject.toml"))["project"]
+    assert pyproject["name"] == plugin["id"], pyproject["name"]
+    assert pyproject["version"] == plugin["version"], (
+        f"pyproject {pyproject['version']} != plugin.toml {plugin['version']}"
+    )
+    assert pyproject["dependencies"] == [], "运行期依赖必须为空：非空则 Market 要求 vendor/"
+
+
 def test_manifest_id_equals_directory_name():
     """验收：plugin.toml 的 id 必须 == 目录名 artcraft_ops（宿主唯一加载源）。"""
     data = tomllib.loads(_read_text(PLUGIN_TOML_NAME))

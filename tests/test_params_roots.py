@@ -74,6 +74,11 @@ CACHE_DIR = r"C:\state\artcraft_ops\cache"
 USER_READ = "D:/Users/Alice/Pictures"          # 用户显式授权：只读
 USER_WRITE = "D:/Users/Alice/Export"           # 用户显式授权：只写
 WIN_INI = r"C:\Windows\win.ini"                # 经典越界目标（模型最想读的文件）
+# v1.0.13 起「值明显是路径拼写」对**任何**键都生效（`_looks_pathish`），所以
+# 「非路径键必须放行」的反例不能再拿盘符根外的绝对路径当载体：改用**已授权读目录
+# 内的文件**。非路径键走读根∪写根 → 放行；把 `south` 错当 `out` 的 substring 实现
+# 按写根判 → 误拒。反例仍然钉得住「不许裸 substring」。
+READ_AUTHORIZED_FILE = USER_READ + "/x.png"
 
 SAFE_CMD = "edit.fill"                          # 白名单内、参数无副作用
 CATALOG = frozenset({SAFE_CMD, "image.imageSize"})
@@ -523,10 +528,12 @@ def test_camel_and_snake_case_path_keys_are_checked(impl):
 
     # 反向：`direction` / `south` 不是路径键 —— token 集合只有 {direction} / {south}，
     # 与词表无交集。裸 substring（`dir` / `out`）的实现会在这里误杀。
-    for params in ({"direction": WIN_INI}, {"south": WIN_INI}):
+    for params in (
+        {"direction": READ_AUTHORIZED_FILE}, {"south": READ_AUTHORIZED_FILE},
+    ):
         sequence.validate_steps(
             [_step(impl, params)], _spec(impl), _cmd_policy(impl), CATALOG,
-            roots=_policy(impl),
+            roots=_policy_with_user_dirs(impl),
         )
 
 
@@ -632,8 +639,13 @@ def test_bare_directory_words_are_checked(impl):
 
     # 反向：`direction` 不是 `dir`（词元级比对，不是前后缀启发式）
     sequence.validate_steps(
-        [_step(impl, {"direction": WIN_INI})], _spec(impl), _cmd_policy(impl), CATALOG,
-        roots=_policy(impl),
+        [_step(impl, {"direction": READ_AUTHORIZED_FILE})], _spec(impl),
+        _cmd_policy(impl), CATALOG, roots=_policy_with_user_dirs(impl),
+    )
+    # 同一条反例的更硬一半：`south` 若被当成含 `out`，会按写根判而误拒读目录内的文件
+    sequence.validate_steps(
+        [_step(impl, {"south": READ_AUTHORIZED_FILE})], _spec(impl),
+        _cmd_policy(impl), CATALOG, roots=_policy_with_user_dirs(impl),
     )
 
 
@@ -671,8 +683,8 @@ def test_plural_scalar_path_keys_are_checked(impl):
 
     # 反向：`status` → 去尾 s = `statu`，不是路径键 → 放行（禁止通用词形还原）
     sequence.validate_steps(
-        [_step(impl, {"status": WIN_INI})], _spec(impl), _cmd_policy(impl), CATALOG,
-        roots=_policy(impl),
+        [_step(impl, {"status": READ_AUTHORIZED_FILE})], _spec(impl),
+        _cmd_policy(impl), CATALOG, roots=_policy_with_user_dirs(impl),
     )
 
 
@@ -863,10 +875,12 @@ def test_mixed_case_path_key_is_checked(impl):
                 or "PATH_UNSAFE" in str(ei.value)), \
             f"键 {key!r} 未被识别为路径键：{_detail(ei.value)}"
 
-    for params in ({"direction": WIN_INI}, {"south": WIN_INI}):
+    for params in (
+        {"direction": READ_AUTHORIZED_FILE}, {"south": READ_AUTHORIZED_FILE},
+    ):
         sequence.validate_steps(
             [_step(impl, params)], _spec(impl), _cmd_policy(impl), CATALOG,
-            roots=_policy(impl),
+            roots=_policy_with_user_dirs(impl),
         )
 
 

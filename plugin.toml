@@ -13,7 +13,7 @@ name = "ArtCraft 全家桶操控"
 description = "用一句话操控本机 ArtCraft 系列软件：检索命令、编排序列、无头执行并回传图片"
 short_description = "操控 ArtCraft 系列软件"
 keywords = ["修图", "调亮", "图层", "导出", "锐化", "ArtCraft", "PhotoCraft", "VectorCraft", "CADCraft", "PdfCraft", "FilmCraft", "DeckCraft", "DesignCraft", "EffectCraft", "FigCraft", "GridCraft", "LightCraft", "MaterialCraft", "SolidCraft", "SoundCraft", "TextureCraft", "WordCraft", "Craft Anything"]
-version = "1.0.12"
+version = "1.0.13"
 type = "plugin"                             # 可省，默认就是 plugin
 entry = "plugin.plugins.artcraft_ops:ArtcraftOpsPlugin"   # ★ 必填（module:Class）
 
@@ -41,7 +41,7 @@ llm_result_fields = ["commands", "app", "version", "total_matched", "hint"]
 id = "artcraft_ops_run_sequence"
 name = "执行序列"
 timeout = 10
-llm_result_fields = ["job_id", "status", "poll_with", "cancel_with"]
+llm_result_fields = ["job_id", "status", "poll_with", "cancel_with", "hint", "confirmation_required", "confirmation_handle", "confirmation_expires_in_s"]
 
 [[plugin.entries]]
 id = "artcraft_ops_get_job"

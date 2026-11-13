@@ -367,3 +367,120 @@ def test_extract_inspect_envelope_missing_does_not_fallback(impl):
     steps = ({"command": "comp.new", "result": {"comp": 1}},)
 
     assert result.extract_inspect(steps, "comp.info") is None
+
+
+# ---------------------------------------------------------------------------
+# v1.0.13 缺口 ④：图片回传按文件头定 MIME，失败不再静默吞
+# ---------------------------------------------------------------------------
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
+_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 40
+_WEBP = b"RIFF" + b"\x24\x00\x00\x00" + b"WEBP" + b"\x00" * 40
+_GIF = b"GIF89a" + b"\x00" * 40
+
+
+class _Images:
+    """记录实际使用的 mime；fail_names 里的文件上传抛异常。"""
+
+    def __init__(self, fail_names=()) -> None:
+        self.mimes: list[str] = []
+        self.data: list[bytes] = []
+        self._fail = tuple(fail_names)
+
+    async def upload(self, data: bytes, mime: str = "image/png") -> dict:
+        self.data.append(data)
+        self.mimes.append(mime)
+        if any(name.encode() in data for name in self._fail):
+            raise RuntimeError("upload rejected")
+        return {"type": "image", "url": "stub://uploaded"}
+
+
+class _Ctx:
+    def __init__(self, images) -> None:
+        self.images = images
+
+
+def _write(tmp_path, name: str, blob: bytes) -> str:
+    path = tmp_path / name
+    path.write_bytes(blob)
+    return str(path)
+
+
+def _materialize(impl, files, images):
+    import asyncio as _asyncio
+
+    result = impl("result")
+    spec_mod = impl("spec")
+    r = spec_mod.ExecResult(
+        ok=True, app_id="photocraft", job_id="job-mime-1", exit_code=0,
+        steps=({"command": "file.export", "ok": True},), output_files=tuple(files),
+    )
+    payload = _asyncio.run(
+        result.materialize(r, spec_mod.SpillPolicy(max_bytes=4_000_000), _Ctx(images)),
+    )
+    return r, payload
+
+
+def test_sniff_mime_from_header(impl):
+    result = impl("result")
+    assert result._sniff_mime(_PNG) == "image/png"
+    assert result._sniff_mime(_JPEG) == "image/jpeg"
+    assert result._sniff_mime(_WEBP) == "image/webp"
+    assert result._sniff_mime(_GIF) == ""
+    assert result._sniff_mime(b"") == ""
+
+
+def test_upload_uses_actual_mime_not_hardcoded_png(impl, tmp_path):
+    """JPEG 文件头必须按 image/jpeg 上传（旧实现一律写 image/png）。"""
+    jpg = _write(tmp_path, "out.jpg", _JPEG)
+    images = _Images()
+    r, payload = _materialize(impl, [jpg], images)
+    assert images.mimes == ["image/jpeg"], images.mimes
+    assert r.preview_url == "stub://uploaded"
+    assert not [w for w in r.warnings if "mime" in w], r.warnings
+
+
+def test_extension_mismatch_warns_and_keeps_header_mime(impl, tmp_path):
+    """.png 扩展名里装 JPEG：警告 + 按文件头的真实 mime 上传。"""
+    fake_png = _write(tmp_path, "shot.png", _JPEG)
+    images = _Images()
+    r, payload = _materialize(impl, [fake_png], images)
+    assert images.mimes == ["image/jpeg"], images.mimes
+    assert any("preview_mime_mismatch" in w for w in r.warnings), r.warnings
+    assert any("preview_mime_mismatch" in w for w in payload["warnings"]), payload["warnings"]
+
+
+def test_unknown_header_not_uploaded(impl, tmp_path):
+    """文件头不是 PNG/JPEG/WebP：不上传、给固定警告（MIME 猜错等于把坏数据推给宿主）。"""
+    weird = _write(tmp_path, "shot.png", _GIF)
+    images = _Images()
+    r, payload = _materialize(impl, [weird], images)
+    assert images.mimes == []
+    assert r.preview_url == ""
+    assert any("preview_unknown_format" in w for w in r.warnings), r.warnings
+
+
+def test_upload_failure_warns_and_continues(impl, tmp_path):
+    """第一张上传失败不再静默 break：给警告并继续试下一张。"""
+    bad = _write(tmp_path, "bad.png", _PNG + b"bad-signature-marker")
+    good = _write(tmp_path, "good.png", _PNG)
+    images = _Images(fail_names=("bad-signature-marker",))
+    r, payload = _materialize(impl, [bad, good], images)
+    assert any("preview_upload_failed" in w for w in r.warnings), r.warnings
+    assert len(images.mimes) == 2, "失败之后必须继续尝试下一张"
+    assert r.preview_url == "stub://uploaded"
+
+
+def test_unreadable_image_warns(impl, tmp_path):
+    """output_files 指向读不到/超大的文件：警告而不是静默跳过。"""
+    missing = str(tmp_path / "gone.png")
+    images = _Images()
+    r, payload = _materialize(impl, [missing], images)
+    assert any("preview_unreadable" in w for w in r.warnings), r.warnings
+    assert images.mimes == []
+
+
+def test_oversized_image_warns(impl, tmp_path):
+    big = _write(tmp_path, "big.png", _PNG + b"\x00" * (5 * 1024 * 1024 + 10))
+    images = _Images()
+    r, payload = _materialize(impl, [big], images)
+    assert any("preview_unreadable" in w for w in r.warnings), r.warnings

@@ -429,6 +429,11 @@ class FakeCtx:
         self.pushes.append(kwargs)
         return {"submitted": True}
 
+    def report_status(self, payload) -> None:
+        # 宿主侧 ctx.report_status 是真的（jobs.report_completion 会调），旧桩没有
+        # 这个属性，等于「结构化回执」这条通道从来没被测过。
+        self.statuses.append(payload)
+
 
 def fake_handle(job_id: str = "job-1", proc: FakeProcess | None = None) -> SimpleNamespace:
     """runner.ProcHandle 的 duck-typed 替身（jobs 层测试用）。"""
@@ -437,3 +442,22 @@ def fake_handle(job_id: str = "job-1", proc: FakeProcess | None = None) -> Simpl
         proc=proc if proc is not None else FakeProcess(),
         started_at=0.0,
     )
+
+
+async def run_write(fn, ctx=None, settle=None, **kwargs):
+    """写请求走两步确认（v1.0.13 默认开启）：第一次拿令牌，第二次带令牌执行。
+
+    非确认返回（校验失败的 envelope / 只读请求的 queued）原样返回，
+    所以历史用例只改调用方式，断言不动。
+    """
+    call_kwargs = dict(kwargs)
+    if ctx is not None:
+        call_kwargs["_ctx"] = ctx
+    first = await fn(**call_kwargs)
+    payload = getattr(first, "value", None)
+    if not isinstance(payload, dict) or not payload.get("confirmation_required"):
+        return await settle(first) if settle is not None else first
+    token = str(payload.get("confirmation_handle") or "")
+    second = await fn(confirmed=True, confirmation_handle=token, **call_kwargs)
+    return await settle(second) if settle is not None else second
+

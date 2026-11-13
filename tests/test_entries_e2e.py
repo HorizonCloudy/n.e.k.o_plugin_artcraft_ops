@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 import pytest
-from _fixtures import FakeCtx, FakeProcess
+from _fixtures import FakeCtx, FakeProcess, run_write
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 TERMINAL = {"succeeded", "failed", "cancelled", "crashed"}
@@ -104,13 +104,16 @@ def test_run_sequence_returns_queued_fast(load_plugin_init, tmp_path, monkeypatc
     monkeypatch.setattr(asyncio, "create_task", spy_create_task, raising=True)
 
     async def scenario():
-        coro = fn(
-            app="photocraft",
+        assert asyncio.iscoroutinefunction(fn), "所有入口必须是 async def"
+
+        async def settle(value):
+            return value
+
+        res = await run_write(
+            fn, ctx=ctx, settle=settle, app="photocraft",
             steps=[{"cmd": "edit.fill", "params": {"color": "#fff"}}],
-            out_file="out.png", inspect=True, _ctx=ctx,
+            out_file="out.png", inspect=True,
         )
-        assert inspect.isawaitable(coro), "所有入口必须是 async def"
-        res = await coro
         for _ in range(50):
             await asyncio.sleep(0)
             if all(t.done() for t in created):
@@ -212,10 +215,10 @@ def test_edit_sequence_never_retried(load_plugin_init, tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", flaky_exec, raising=False)
 
     async def scenario():
-        res = await run_fn(
-            app="photocraft",
+        res = await run_write(
+            run_fn, ctx=ctx, app="photocraft",
             steps=[{"cmd": "edit.fill"}, {"cmd": "document.inspect"}],
-            out_file="o.png", _ctx=ctx,
+            out_file="o.png",
         )
         assert isinstance(res, Ok), f"入口应秒回 queued，实际 {res!r}"
         return await _drive_to_terminal(get_fn, res.value["job_id"], ctx)
@@ -253,9 +256,9 @@ def test_readonly_retry_once(load_plugin_init, tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", flaky_exec, raising=False)
 
     async def scenario():
-        res = await run_fn(
-            app="photocraft", steps=[{"cmd": "document.inspect"}],
-            out_file="o.png", _ctx=ctx,
+        res = await run_write(
+            run_fn, ctx=ctx, app="photocraft", steps=[{"cmd": "document.inspect"}],
+            out_file="o.png",
         )
         assert isinstance(res, Ok), f"入口应秒回 queued，实际 {res!r}"
         job_id = res.value["job_id"]
@@ -303,9 +306,9 @@ def test_run_sequence_honours_configured_user_root(load_plugin_init, tmp_path, m
 
     async def scenario():
         async def call():
-            return await fn(
-                app="photocraft", steps=steps, input_file=str(src),
-                out_file="out.png", inspect=True, _ctx=ctx,
+            return await run_write(
+                fn, ctx=ctx, app="photocraft", steps=steps, input_file=str(src),
+                out_file="out.png", inspect=True,
             )
 
         roots.configure_security({})
@@ -376,10 +379,10 @@ def test_new_doc_is_second_llm_controlled_channel(load_plugin_init, tmp_path, mo
         )
         calls_after_bad = list(calls)          # 越界那一半绝不能 spawn
 
-        good = await fn(
-            app="photocraft",
+        good = await run_write(
+            fn, ctx=ctx, app="photocraft",
             new_doc={"width": 10, "height": 10, "background": "white"},
-            steps=steps, out_file="out.png", _ctx=ctx,
+            steps=steps, out_file="out.png",
         )
         for _ in range(50):
             await asyncio.sleep(0)

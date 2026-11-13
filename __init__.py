@@ -33,6 +33,7 @@ from plugin.sdk.plugin import (
 from . import (
     app_registry,
     command_catalog,
+    confirm,
     errors,
     jobs,
     locator,
@@ -119,6 +120,14 @@ RUN_SCHEMA: dict[str, Any] = {
         "inspect": {
             "type": "boolean",
             "description": "序列末尾自动追加 document.inspect，默认 true",
+        },
+        "confirmed": {
+            "type": "boolean",
+            "description": "写操作二次确认：第二次提交时置 true（默认配置下必带）",
+        },
+        "confirmation_handle": {
+            "type": "string",
+            "description": "上一次返回的一次性令牌；必须与同一批参数一起提交",
         },
     },
     "required": ["steps"],
@@ -381,7 +390,11 @@ class ArtcraftOpsPlugin(NekoPluginBase):
         id="artcraft_ops_run_sequence",
         name="执行序列",
         timeout=10.0,
-        llm_result_fields=["job_id", "status", "poll_with", "cancel_with"],
+        llm_result_fields=[
+            "job_id", "status", "poll_with", "cancel_with", "hint",
+            "confirmation_required", "confirmation_handle",
+            "confirmation_expires_in_s",
+        ],
     )
     @llm_tool(
         name="artcraft_ops_run_sequence",
@@ -400,13 +413,21 @@ class ArtcraftOpsPlugin(NekoPluginBase):
         new_doc: Any = None,
         out_file: Any = None,
         inspect: Any = None,
+        confirmed: Any = None,
+        confirmation_handle: Any = None,
         **_,
     ):
         ctx = _ctx_of(self, _)
         try:
             app_id = str(app or _DEFAULT_APP).strip() or _DEFAULT_APP
             spec_obj = app_registry.get_spec(app_id)
-            policy = spec.CommandPolicy()
+            # 深评缺口①：require_confirm_on_write 过去只在配置表里躺着，没有任何
+            # 调用点读它。现在入口按 startup 注入的快照构造策略。
+            policy = spec.CommandPolicy(
+                require_confirm_on_write=_truthy(
+                    roots_mod.active_security().get("require_confirm_on_write"), True,
+                ),
+            )
             step_list = sequence.steps_from_payload(steps, spec_obj)
             if not step_list:
                 return errors.safe_err("POLICY_VIOLATION", reason="steps 不能为空")
@@ -458,10 +479,41 @@ class ArtcraftOpsPlugin(NekoPluginBase):
                 new_doc_value or {}, roots_policy,
                 extra_path_keys=sequence.NEW_DOC_PATH_KEYS,
             )
+
+            # 写操作二次确认（默认开启）：全部输入校验之后、建 job 之前拦一次。
+            # 只读序列（无 out_file / 无 new_doc / 全只读命令）不受影响。
+            is_edit = sequence.is_edit_sequence(step_list, spec_obj)
+            write_requested = (
+                is_edit
+                or bool(raw_out)
+                or new_doc_value is not None
+                or str(getattr(spec_obj, "builder", "")) == "tool_subcmd"
+            )
+            if policy.require_confirm_on_write and write_requested:
+                request_fp = confirm.fingerprint(
+                    app_id, step_list, raw_input, raw_out, new_doc_value,
+                )
+                if _truthy(confirmed, False) or confirmation_handle:
+                    if not confirm.consume(str(confirmation_handle or ""), request_fp):
+                        return errors.safe_err(
+                            "POLICY_VIOLATION",
+                            reason="确认令牌无效、已过期或与本次请求不符",
+                        )
+                else:
+                    return Ok(tool_output({
+                        "confirmation_required": True,
+                        "confirmation_handle": confirm.issue(request_fp),
+                        "confirmation_expires_in_s": confirm.CONFIRM_TTL_S,
+                        "hint": (
+                            "写操作需要二次确认：用同一批参数再提交一次，"
+                            "并带 confirmed=true 与 confirmation_handle"
+                        ),
+                    }))
+
             source = spec.Source(input_file=raw_input, new_doc=new_doc_value)
 
             job = jobs.create_job(
-                app_id, (), is_edit_sequence=sequence.is_edit_sequence(step_list, spec_obj),
+                app_id, (), is_edit_sequence=is_edit,
             )
             job.step_total = len(step_list)
             job.result_path = raw_out
